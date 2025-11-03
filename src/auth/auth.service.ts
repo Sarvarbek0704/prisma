@@ -1,5 +1,7 @@
 import {
+  BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   UnauthorizedException,
 } from "@nestjs/common";
@@ -9,7 +11,7 @@ import { Users } from "@prisma/client";
 import { CreateUserDto, SignInUserDto } from "../user/dto";
 import { UserService } from "../user/user.service";
 import bcrypt from "bcrypt";
-import { Response } from "express";
+import type { Request, Response } from "express";
 
 @Injectable()
 export class AuthService {
@@ -36,7 +38,6 @@ export class AuthService {
         expiresIn: process.env.REFRESH_TOKEN_TIME as any,
       }),
     ]);
-
     return { accessToken, refreshToken };
   }
 
@@ -67,19 +68,82 @@ export class AuthService {
       user.hashedPassword
     );
     if (!confirmPassword) {
-      throw new UnauthorizedException("parol yoki email notog'ri");
+      throw new UnauthorizedException("Email yoki parol notog'ri");
     }
 
     const { accessToken, refreshToken } = await this.genereteTokens(user);
     const hashedRefreshToken = await bcrypt.hash(refreshToken, 7);
+
     await this.prismaService.users.update({
       where: { id: user.id },
       data: { hashedRefreshToken },
     });
+
     res.cookie("refreshToken", refreshToken, {
       maxAge: Number(process.env.COOKIE_TIME),
       httpOnly: true,
     });
+
     return { message: "User signed in", id: user.id, accessToken };
+  }
+
+  async refreshTokens(req: Request, res: Response) {
+    const token = req.cookies?.refreshToken;
+    if (!token) {
+      throw new UnauthorizedException("Token topilmadi");
+    }
+
+    const payload = await this.jwtService.verify(token, {
+      secret: process.env.REFRESH_TOKEN_KEY,
+    });
+
+    const user = await this.prismaService.users.findUnique({
+      where: { id: payload.id },
+    });
+
+    if (!user || !user.hashedRefreshToken) {
+      throw new UnauthorizedException("Foydalanuvchi topilmadi");
+    }
+    const isMatch = await bcrypt.compare(token, user.hashedRefreshToken);
+    if (!isMatch) {
+      throw new UnauthorizedException("Refresh token notogri");
+    }
+    const { accessToken, refreshToken } = await this.genereteTokens(user);
+    const hashedRefreshToken = await bcrypt.hash(refreshToken, 7);
+
+    await this.prismaService.users.update({
+      where: { id: user.id },
+      data: { hashedRefreshToken },
+    });
+
+    res.cookie("refreshToken", refreshToken, {
+      maxAge: Number(process.env.COOKIE_TIME),
+      httpOnly: true,
+    });
+
+    return { accessToken };
+  }
+
+  async signOut(refreshToken: string, res: Response) {
+    const userDate = await this.jwtService.verify(refreshToken, {
+      secret: process.env.REFRESH_TOKEN_KEY,
+    });
+    if (!userDate) {
+      throw new ForbiddenException("User not varified");
+    }
+    const user = await this.userService.findOne(userDate.id);
+    if (!user) {
+      throw new BadRequestException("Notog'ri token");
+    }
+    const hashedRefreshToken = "";
+    await this.prismaService.users.update({
+      where: { id: user.id },
+      data: { hashedRefreshToken },
+    });
+
+    res.clearCookie("refreshToken");
+    return {
+      message: "User Loged out",
+    };
   }
 }
